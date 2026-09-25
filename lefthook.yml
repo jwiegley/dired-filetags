@@ -1,0 +1,46 @@
+# Pre-commit checks, mirroring `nix flake check'.
+#
+# `nix develop' installs these hooks (its shellHook runs `lefthook
+# install') and puts every tool they call on PATH: Emacs with
+# package-lint, format-all, relint and dired-subtree, the filetags CLI
+# the ERT suite drives, and lefthook itself.  Commit from inside that
+# shell, so the hooks use the same tools as the flake checks.
+pre-commit:
+  parallel: true
+  commands:
+    # The .elc files go to a scratch directory that is deleted on exit,
+    # so none is left next to the sources, where Emacs could load it
+    # instead of a newer edit.
+    byte-compile:
+      glob: "*.el"
+      run: >
+        emacs --batch -L . \
+          --eval '(setq load-prefer-newer t byte-compile-error-on-warn t)' \
+          --eval '(let ((dir (make-temp-file "dired-filetags-elc-" t)))
+                    (setq byte-compile-dest-file-function
+                          (lambda (file)
+                            (expand-file-name (concat (file-name-base file) ".elc") dir)))
+                    (add-hook (quote kill-emacs-hook) (lambda () (delete-directory dir t))))' \
+          -f batch-byte-compile {staged_files}
+    format-check:
+      glob: "*.el"
+      run: scripts/check-format.sh {staged_files}
+    package-lint:
+      glob: "dired-filetags.el"
+      run: >
+        emacs --batch -L . \
+          -l package-lint \
+          -f package-lint-batch-and-exit {staged_files}
+    checkdoc:
+      glob: "*.el"
+      exclude: "scripts/**"
+      run: emacs --batch -L . -l scripts/run-checkdoc.el {staged_files}
+    relint:
+      glob: "*.el"
+      run: emacs --batch -L . -l relint -f relint-batch {staged_files}
+    ert:
+      glob: "*.el"
+      run: emacs --batch -Q -L . --eval '(setq load-prefer-newer t)' -l ert -l dired-filetags-test.el -f ert-run-tests-batch-and-exit
+    nix-check:
+      glob: "{*.nix,flake.lock}"
+      run: nix flake check --no-warn-dirty 2>&1

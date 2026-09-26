@@ -1,0 +1,13 @@
+extends: default
+rules:
+  document-start: disable
+  truthy:
+    check-keys: false # `on:` in workflows
+  comments:
+    min-spaces-from-content: 1 # prettier writes one space
+  line-length:
+    max: 100
+  # Off by default: an unquoted 0755 is the number 493.  key-ordering
+  # and quoted-strings stay off, as they fight GitHub's and lefthook's
+  # conventional key order and prettier's quoting.
+  octal-values: enable

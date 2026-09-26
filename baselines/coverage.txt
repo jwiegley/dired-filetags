@@ -1,0 +1,23 @@
+# Line coverage baselines of dired-filetags.el, one line per system:
+#
+#   SYSTEM EMACS COVERED TOTAL
+#
+# SYSTEM is the Nix system (aarch64-darwin, x86_64-linux, ...), EMACS the
+# `emacs-version' that ran the suite, COVERED and TOTAL the executable
+# lines undercover.el saw run and saw at all.  The numbers differ between
+# systems because some tests skip on some platforms.
+#
+# scripts/coverage.sh fails the gate if a run misses more lines than
+# its baseline AND covers a smaller fraction (COVERED/TOTAL, compared as
+# exact integers).  Deleting covered code, or adding well-covered code,
+# therefore passes; adding uncovered code that lowers the fraction fails.
+# Without a line for the system, or with a line for another Emacs
+# version, the gate fails, as it would compare nothing.
+#
+# Record a system's line with `scripts/coverage.sh --update', or from a
+# report built elsewhere with `scripts/coverage.sh --update DIR --system
+# SYS'.  Change this file deliberately, in a commit of its own.  Lines are
+# kept sorted by system.
+aarch64-darwin 30.2 839 854
+aarch64-linux 30.2 839 854
+x86_64-linux 30.2 839 854

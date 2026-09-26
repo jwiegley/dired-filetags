@@ -1,0 +1,4 @@
+# Every optional check, except braces around every variable reference,
+# which is not the house style.
+enable=all
+disable=SC2250

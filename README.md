@@ -99,7 +99,7 @@ key. `dired-filetags-add` never removes anything, and
 `dired-filetags-display-style` picks one of four styles:
 
 | Style             | What you see                                                                              |
-|-------------------|-------------------------------------------------------------------------------------------|
+| ----------------- | ----------------------------------------------------------------------------------------- |
 | `right` (default) | `Report.pdf`, with `work` and `urgent` as labels ending two columns from the right edge   |
 | `aligned`         | `Report.pdf`, with the labels in a column `dired-filetags-align-width` (32) columns along |
 | `inline`          | The name as it is, with each tag coloured in place                                        |
@@ -118,7 +118,7 @@ that's where I go to repair a garbled name by hand.
 
 Most of my directories have no tagged files at all, so the mode has to
 cost nothing there. Each stretch of lines that jit-lock hands it is
-searched once for ` -- `, and if that isn't found, no line is examined.
+searched once for " -- ", and if that isn't found, no line is examined.
 With the default prefix, turning the mode on doesn't change any key Dired
 already binds; it only adds keys that were free.
 
@@ -130,7 +130,7 @@ all. `C-u` in front of any of them unmarks instead. Since marks
 accumulate, these forms combine:
 
 | Selection       | Keys                              |
-|-----------------|-----------------------------------|
+| --------------- | --------------------------------- |
 | a or b          | `; m a b RET`                     |
 | a and b         | `; m a RET`, then `C-u ; n b RET` |
 | a and not b     | `; m a RET`, then `C-u ; m b RET` |
@@ -236,17 +236,19 @@ For working on the package itself, Nix gives you a shell with everything:
 nix develop
 ```
 
-This provides Emacs with `package-lint`, `format-all`, `relint` and
-`dired-subtree` (for the two tests that use it), the `filetags` CLI the
-tests drive, and `lefthook`, whose `pre-commit` hooks are installed on
-entry.
+That's Emacs 30.2 from the locked nixpkgs, with `package-lint`,
+`format-all`, `relint`, `undercover` and `dired-subtree`; the `filetags`
+CLI the tests drive, and a Python that can load filetags' own source for
+the fuzzer; bash 5, git and lcov; and every formatter and linter the
+targets below call. Entering the shell also installs the lefthook
+`pre-commit` hooks.
 
 ### Keys
 
 With the default prefix:
 
 | Key          | Command                         | What it does                                                   |
-|--------------|---------------------------------|----------------------------------------------------------------|
+| ------------ | ------------------------------- | -------------------------------------------------------------- |
 | `; a`        | `dired-filetags-add-remove`     | Add tags, or remove a tag that every selected file has         |
 | `; m`, `* #` | `dired-filetags-mark`           | Mark files with any of the tags (`C-u`: unmark)                |
 | `; n`, `* ~` | `dired-filetags-mark-not`       | Mark files with none of the tags (`C-u`: unmark)               |
@@ -289,54 +291,202 @@ Custom forgets a use-package `:custom` value across the reload too, so a
 prefix set that way comes back as `;`; `setopt` it again, as in
 `(setopt dired-filetags-prefix-key "C-c t")`.
 
+### Targets
+
+| Command                                    | What it does                                                           |
+| ------------------------------------------ | ---------------------------------------------------------------------- |
+| `nix build`                                | Builds the package, autoloads included, with every warning an error    |
+| `nix flake check`                          | Builds and runs the fourteen checks below                              |
+| `nix run .#test [-- REGEXP]`               | Runs the ERT suite, or just the tests matching REGEXP                  |
+| `nix run .#format`, `nix fmt [-- PATH...]` | Formats every file, or the PATHs                                       |
+| `nix run .#lint [-- CHECK...]`             | Runs all eleven linters, or the ones named                             |
+| `nix run .#coverage`                       | Writes `reports/coverage/` and checks it against the baseline          |
+| `nix run .#perf`                           | Measures this machine: writes `reports/perf/` and runs both perf gates |
+| `nix run .#fuzz [-- --seconds N]`          | Fuzzes with fresh seeds for ten minutes, or N seconds                  |
+| `nix run .#fuzz -- --seed S`               | Replays one seed                                                       |
+| `nix run .#update-baselines`               | Records this machine's coverage and performance numbers                |
+| `nix build .#coverage`                     | The coverage report, as lcov data, a summary and HTML                  |
+| `nix build .#perf-report`                  | A reference profile, measured in a Nix build sandbox                   |
+
+`nix build` makes the package the way nixpkgs makes the ones it takes
+from MELPA, with `dired-filetags-autoloads.el`, byte- and
+native-compiled by a bare Emacs, so that a stray `require` of one of the
+dev tools can't sneak through. That also means `packages.default` works
+as it is in `emacsWithPackages`.
+
+The apps run from any directory of the checkout, and the PATHs and
+FILEs you give `format` and `lint` are relative to the one you're in.
+Formatting means format-all for Emacs Lisp, nixfmt, shfmt, and prettier
+for YAML and Markdown. `LICENSE.md` is left alone, because prettier
+would collapse the two spaces in its copyright line.
+
+`nix build .#perf-report` isn't a measurement of the machine you run it
+on. The first time I built it on my laptop, Nix handed me a profile that
+one of my build servers had measured. It's measured once,
+in whichever build sandbox gets to it, and cached by input hash from
+then on. Its allocation counts hold for every machine of the system,
+which is what the `perf` check gates, but its timings belong to that one
+build, and `PROVENANCE.txt` and the top of `perf.txt` say where and when
+that was. For numbers from the machine in front of you, run
+`nix run .#perf`. CI uploads both reports.
+
+The flake offers aarch64-darwin, aarch64-linux and x86_64-linux, the
+systems that have baselines. There's no x86_64-darwin: nixpkgs warns
+that its support is ending, and the `--option abort-on-warn true` that
+the hooks and CI pass turns that warning into an error.
+
 ### Checks
 
-The checks run via `nix flake check`, which covers:
+`nix flake check` runs each of these in a fresh sandbox that gets only
+the files and tools it uses, so a README edit rebuilds three of them,
+not all fourteen:
 
-- **ERT** for the name parser, the stand-in oracle, planning, renaming,
-  marking, TagTrees and rendering, driving the real `filetags` (and `git`,
-  for the version-control cases) in throwaway directories
-- **Byte-compilation** of the package and its tests, with warnings
-  treated as errors
-- **package-lint** for package header and dependency conventions
-- **checkdoc** for docstring style
-- **relint** for regexp correctness
-- **format** to confirm both files match `format-all`
+- `build`: the package, as above
+- `ert`: the ERT suite, driving the real `filetags` (and `git`) in
+  throwaway directories
+- `leak`: the suite again, failing on anything a test leaves behind
+- `fuzz`: the property tests, with the fixed seed and 1000 inputs each
+- `coverage`: line coverage against its baseline
+- `perf`: allocations against their baseline, with timings reported only
+- `format`: every file is formatted
+- `lint`: check-declare, statix, deadnix, shellcheck, yamllint,
+  `lefthook validate`, actionlint, zizmor and rumdl
+- `byte-compile`: every `.el` file, with every warning an error
+- `native-compile`: the package, failing on any native-compiler warning
+- `package-lint`: package headers and conventions
+- `checkdoc`: docstring style
+- `relint`: the regexps
+- `apps`: every app, the formatter and the dev shell build, and the
+  apps run from a subdirectory with nothing but `/usr/bin` and `/bin` on
+  `PATH`, without changing or leaving a file
 
-A few tests need more than Emacs: `filetags` on `PATH`, `git` for the
-version-control cases, and `dired-subtree` for two rendering and refresh
-cases. Without them those tests skip rather than fail, so it's worth
-reading the `skipped` count. The flake provides all three. The ERT suite
-also runs outside Nix, from this directory:
+ERT counts a skipped test as a pass, and without `filetags`, `git` or
+`dired-subtree` the suite skips dozens of them. So everything that runs
+the suite (the `ert` and `leak` checks, `nix run .#test`, the pre-commit
+jobs and coverage) fails when more than one test skips. One always
+does: of the two case-sensitivity tests, only one fits the file system.
+If you run plain ERT outside Nix, read the `skipped` count before
+trusting a green result.
 
-```bash
-emacs -Q -batch -L . --eval '(setq load-prefer-newer t)' \
-  -l ert -l ./dired-filetags-test.el -f ert-run-tests-batch-and-exit
-```
+### Pre-commit
 
-Pre-commit hooks (via lefthook) run the same checks in parallel on staged
-files, and `nix flake check` when `flake.nix` or `flake.lock` changes.
-Commit from inside `nix develop`, so the hooks see the same tools. To run
-them all by hand:
+lefthook calls the same scripts. Everything goes into one parallel group
+(the formatter, the linters, ERT, the leak check, the fuzzer, coverage,
+and `nix build` and `nix flake check` when Nix files change), and then
+the timing gate runs by itself. It has to: timings taken while four
+copies of the suite load every core measure the load, not the code.
 
-```bash
-lefthook run pre-commit --all-files
-```
+The formatter and the linters look only at the files being committed,
+so a stray draft can't block a commit, unless one of them is a script or
+setting behind those tools; then they check everything in the index. The
+hook works from any git client: inside `nix develop` it runs lefthook
+directly, and anywhere else, Magit included, it reruns itself through
+`nix develop`, so the jobs always see the same tools and baselines. Run
+them all by hand with `lefthook run pre-commit --all-files`.
 
-### Formatting
+CI runs the same hooks on Linux and macOS, except the two Nix jobs,
+which it runs as steps of their own. Alongside those come `nix build`,
+the report builds, and an evaluation of every system the flake offers,
+so a new Nix warning on any of them fails the run, even one for a
+system CI doesn't build.
 
-The formatting scripts need `format-all`, so run them inside
-`nix develop`. To format both files in place:
+### Baselines
 
-```bash
-scripts/format.sh dired-filetags.el dired-filetags-test.el
-```
+`baselines/` holds the numbers the gates compare against:
 
-To check formatting without modifying:
+- **Coverage** (`coverage.txt`) is keyed by system and Emacs version.
+  It fails only when more lines go unrun _and_ the covered fraction
+  drops, so deleting covered code, or adding well-tested code, passes.
+- **Allocations** (`perf.eld`) are keyed by system, Emacs version and
+  native compilation. `memory-use-counts` is deterministic, so they're
+  checked on any machine, and fail at 5% over. Every counter counts,
+  including the string characters of the workloads that build file
+  names: their files live in a directory in `/tmp`, so those names are
+  the same length in the dev shell, the Nix sandbox and CI.
+- **Timings** (`perf.eld` too) are keyed by system and host name. Each
+  workload's fastest sample is divided by the lower quartile of the
+  samples of a calibration loop interleaved with it in the same run, so
+  the power source and Low Power Mode mostly cancel out, and samples
+  taken while the machine was busy don't count. One that comes in over
+  1.05 times its baseline (1.08 when the power mode isn't the one the
+  baseline was recorded in) is re-measured; if it's still over, two
+  fresh Emacs processes measure it too, and it fails only if the median
+  of the three is over. Anywhere without an entry, CI and Nix builders
+  included, timings are only reported, and the output says so; so does
+  a run that lands on an efficiency core, where the ratios don't hold.
 
-```bash
-scripts/check-format.sh dired-filetags.el dired-filetags-test.el
-```
+A gate with nothing to compare against fails rather than passing: a
+missing baseline file, no entry for the system, or one recorded with
+another Emacs. After a deliberate change, run
+`nix run .#update-baselines` and commit the diff on its own. A
+`flake.lock` bump that changes Emacs fails the gates until you do. It
+records the median of three Emacs processes' timings, so the entry sits
+in the middle of what a gate run sees. It won't record timings from a
+run with too few clean samples, or one whose calibration is much slower
+than the entry it would replace; it says why and stops, with the
+allocations already written. The other systems'
+numbers come from their `.#packages.SYS.coverage` and
+`.#packages.SYS.perf-report` builds; CLAUDE.md has the commands.
+
+The timing gate was the hardest part to get right. Its first version
+failed about half its runs on unchanged code while my MacBook was on
+battery, and it took a pile of raw samples to see that Low Power Mode
+wasn't the cause. The failing runs were the ones where Emacs had landed
+on an efficiency core, which is two and a half times slower, and where
+the ratios don't hold. Three smaller effects took longer to find. The
+benchmark's files lived in `$TMPDIR`, whose name has a different length
+in each kind of shell, and two workloads take longer the longer their
+file names are, so the same code measured 5% apart depending on where I
+ran it; the files live in `/tmp` now. Every ratio was divided by the
+single fastest calibration sample, so one lucky sample could push all
+of them up by a few percent; it's the lower quartile now. And a ratio
+wobbles by a percent or two from one Emacs process to the next, which
+no number of samples in one process can average away, hence the median
+of three processes, both for the baseline and before a failure counts.
+
+### Fuzzing
+
+`dired-filetags-fuzz-test.el` checks nine properties on generated names
+and tags. The main one compares the parser with filetags' own
+`FILE_WITH_TAGS_REGEX`, run by Python from the pinned source; the others
+cover round trips, tag checking, verification, and the real CLI on
+batches of stand-ins. `DIRED_FILETAGS_FUZZ_SEED` and
+`DIRED_FILETAGS_FUZZ_ITERATIONS` pick the inputs, and each property
+reseeds from `SEED:PROPERTY`, so a seed gives the same inputs on every
+system. A failure prints the seed, the input, a shrunk input, and the
+command that replays it, `scripts/fuzz.sh --seed S --iterations N`.
+The inputs depend only on the seed, never on the package's code, and a
+test checks that the replay command regenerates exactly the failing
+input.
+
+There's one intended difference from filetags. Its regexp ends in `$`,
+which also matches before a final newline, so filetags reads
+`"a -- b\n"` as tagged; this package treats every name with a newline as
+untagged.
+
+### The leak check
+
+AddressSanitizer and MemorySanitizer don't apply here: they'd be testing
+Emacs's C core, not this package. What a Lisp package can get wrong is
+the state a test leaves behind, so the `leak` check runs the suite under
+`scripts/leak-check.el`, which compares snapshots before and after every
+test and fails on new buffers, processes, timers, hook entries (the
+package's functions and any closure, global or buffer-local), overlays,
+temporary files, key bindings or advice, and on changes to the
+package's variables (hash tables compared by contents), the minibuffer
+histories and the kill ring. It also looks just before the test fixture
+cleans up, since the fixture deletes its directory and kills the
+buffers made in it: a buffer the package leaked while a Dired buffer
+there was current would otherwise vanish unseen, along with its
+process. The
+first time it ran, it caught four tests that, run inside my Emacs, would
+have added to my histories and kill ring.
+
+### Documentation
+
+There's nothing to build. This README is the documentation, GitHub
+renders it, and rumdl and prettier keep it tidy along with the rest of
+the Markdown.
 
 ## License
 

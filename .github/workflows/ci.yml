@@ -6,13 +6,60 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the run in
+# progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: Checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v30
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          nix_path: nixpkgs=channel:nixpkgs-unstable
-      - name: Run all checks
-        run: nix flake check --print-build-logs
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Build the package
+        run: nix build --print-build-logs --option abort-on-warn true
+      # The copies go to reports/ci, not reports/coverage, which the
+      # pre-commit coverage job below writes.  They keep the Nix
+      # store's read-only modes, so they are made writable.  Each
+      # report is copied as soon as it is built, so a failed perf
+      # report still leaves the coverage report to upload.
+      - name: Build the coverage and performance reports
+        run: |
+          mkdir -p reports/ci
+          nix build --print-build-logs --option abort-on-warn true \
+            --out-link result-coverage .#coverage
+          cp -RL result-coverage reports/ci/coverage
+          chmod -R u+w reports/ci/coverage
+          nix build --print-build-logs --option abort-on-warn true \
+            --out-link result-perf .#perf-report
+          cp -RL result-perf reports/ci/perf
+          chmod -R u+w reports/ci/perf
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-${{ matrix.os }}
+          path: reports/ci/
+      # Evaluation only, of every system the flake offers, so that a
+      # new evaluation warning on any of them fails here, not only on
+      # the machines of that system.
+      - name: Evaluate every system
+        run: nix flake check --all-systems --no-build --option abort-on-warn true
+      - name: Run every flake check
+        run: nix flake check --print-build-logs --option abort-on-warn true
+      - name: Run the pre-commit hooks
+        env:
+          LEFTHOOK_EXCLUDE: nix
+        run: nix develop --command lefthook run pre-commit --all-files --no-auto-install

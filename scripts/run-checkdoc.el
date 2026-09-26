@@ -22,7 +22,8 @@
         (condition-case err
             (checkdoc-current-buffer t)
           (error
-           (message "checkdoc error in %s: %s" file err)))
+           (message "checkdoc error in %s: %s" file err)
+           (setq errors-found t)))
         (let ((diag-buf (get-buffer "*checkdoc-batch*")))
           (when diag-buf
             (with-current-buffer diag-buf

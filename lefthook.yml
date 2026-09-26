@@ -1,46 +1,87 @@
-# Pre-commit checks, mirroring `nix flake check'.
+# Pre-commit checks.  They mirror `nix flake check' and call the same
+# scripts, with the tools, baselines and environment of `nix develop'.
 #
-# `nix develop' installs these hooks (its shellHook runs `lefthook
-# install') and puts every tool they call on PATH: Emacs with
-# package-lint, format-all, relint and dired-subtree, the filetags CLI
-# the ERT suite drives, and lefthook itself.  Commit from inside that
-# shell, so the hooks use the same tools as the flake checks.
+# The hook works from any git client.  Its shellHook installs it, and
+# sets DIRED_FILETAGS_SYSTEM, so inside `nix develop' the hook runs
+# lefthook directly; anywhere else, such as Magit in an Emacs started
+# outside the dev shell, it runs lefthook through `nix develop'.
+# lefthook pastes this command into a double-quoted string in
+# .git/hooks/pre-commit, which is why two parameter expansions choose
+# the prefix instead of an `if' with quotes.
+lefthook: >-
+  ${DIRED_FILETAGS_SYSTEM:+env DIRED_FILETAGS_SYSTEM=}${DIRED_FILETAGS_SYSTEM:-nix
+  develop --no-warn-dirty --command} lefthook
+
+# Everything runs in one parallel group except the timing gate, which
+# runs by itself afterwards: timings taken while ERT, coverage and the
+# fuzzer load every core would measure the load, not the code.
+#
+# ERT counts a skipped test as a pass, so the ert and leak jobs load
+# scripts/ert-skip-budget.el, as the flake's checks and coverage.sh
+# do: a run in which more than one test skips fails (exit status 2).
+#
+# format and the linters see only the staged files ({staged_files},
+# which --all-files turns into every tracked file), so a file that is
+# not part of the commit cannot fail it.  A staged change to a script
+# or configuration file behind them makes them check every file in the
+# index instead; see scripts/format-all.sh and scripts/lint.sh.  Each
+# glob also names the scripts that implement its job.
 pre-commit:
-  parallel: true
-  commands:
-    # The .elc files go to a scratch directory that is deleted on exit,
-    # so none is left next to the sources, where Emacs could load it
-    # instead of a newer edit.
-    byte-compile:
-      glob: "*.el"
-      run: >
-        emacs --batch -L . \
-          --eval '(setq load-prefer-newer t byte-compile-error-on-warn t)' \
-          --eval '(let ((dir (make-temp-file "dired-filetags-elc-" t)))
-                    (setq byte-compile-dest-file-function
-                          (lambda (file)
-                            (expand-file-name (concat (file-name-base file) ".elc") dir)))
-                    (add-hook (quote kill-emacs-hook) (lambda () (delete-directory dir t))))' \
-          -f batch-byte-compile {staged_files}
-    format-check:
-      glob: "*.el"
-      run: scripts/check-format.sh {staged_files}
-    package-lint:
-      glob: "dired-filetags.el"
-      run: >
-        emacs --batch -L . \
-          -l package-lint \
-          -f package-lint-batch-and-exit {staged_files}
-    checkdoc:
-      glob: "*.el"
-      exclude: "scripts/**"
-      run: emacs --batch -L . -l scripts/run-checkdoc.el {staged_files}
-    relint:
-      glob: "*.el"
-      run: emacs --batch -L . -l relint -f relint-batch {staged_files}
-    ert:
-      glob: "*.el"
-      run: emacs --batch -Q -L . --eval '(setq load-prefer-newer t)' -l ert -l dired-filetags-test.el -f ert-run-tests-batch-and-exit
-    nix-check:
-      glob: "{*.nix,flake.lock}"
-      run: nix flake check --no-warn-dirty 2>&1
+  jobs:
+    - name: checks
+      group:
+        parallel: true
+        jobs:
+          - name: format
+            run: scripts/format-all.sh --check --staged {staged_files}
+          - name: lint
+            run: >-
+              scripts/lint.sh --staged check-declare nix shell yaml actions
+              markdown -- {staged_files}
+          - name: byte-compile
+            glob: "{*.el,scripts/lint.sh}"
+            run: scripts/lint.sh --staged byte-compile -- {staged_files}
+          - name: native-compile
+            glob: "{dired-filetags.el,scripts/compile.el,scripts/lint.sh}"
+            run: scripts/lint.sh native-compile
+          - name: package-lint
+            glob: "{dired-filetags.el,scripts/lint.sh}"
+            run: scripts/lint.sh package-lint
+          - name: checkdoc
+            glob: "{*.el,scripts/lint.sh}"
+            run: scripts/lint.sh --staged checkdoc -- {staged_files}
+          - name: relint
+            glob: "{*.el,scripts/lint.sh}"
+            run: scripts/lint.sh --staged relint -- {staged_files}
+          - name: ert
+            glob: "*.el"
+            run: >-
+              emacs --batch -Q -L . --eval '(setq load-prefer-newer t)'
+              -l ert -l dired-filetags-test.el -l scripts/ert-skip-budget.el
+              -f ert-run-tests-batch-and-exit
+          - name: leak
+            glob: "*.el"
+            run: >-
+              emacs --batch -Q -L . --eval '(setq load-prefer-newer t)'
+              -l ert -l dired-filetags-test.el -l scripts/ert-skip-budget.el
+              -l scripts/leak-check.el
+              -f dired-filetags-leak-check-batch-and-exit
+          - name: fuzz
+            glob: "{*.el,scripts/fuzz.sh}"
+            run: scripts/fuzz.sh --check
+          - name: coverage
+            glob: "{*.el,scripts/coverage.sh,baselines/coverage.txt}"
+            run: scripts/coverage.sh
+          - name: nix-build
+            tags: [nix]
+            glob: "{*.el,*.nix,flake.lock}"
+            run: nix build --no-link --no-warn-dirty --option abort-on-warn true
+          - name: nix-check
+            tags: [nix]
+            glob: "{*.nix,flake.lock,scripts/*,baselines/*}"
+            run: nix flake check --no-warn-dirty --option abort-on-warn true
+    - name: perf
+      glob: "{*.el,baselines/perf.eld}"
+      run: >-
+        emacs -Q --batch -L . -l scripts/bench.el
+        -f dired-filetags-bench-batch --gate all

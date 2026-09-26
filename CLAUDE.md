@@ -16,7 +16,7 @@ leaves unbound). The only tagging key is `; a`, `dired-filetags-add-remove`;
 The filetags program decides every new name; Emacs never computes one
 itself:
 
-```
+```text
 ; a (add-remove), M-x dired-filetags-add / -remove
     │
     ├─► dired-filetags--plan       classify, group by (vocabulary . tokens)
@@ -51,13 +51,102 @@ below).
 ## Development Commands
 
 No traditional build system (no Makefile, Eask, or Cask). Nix provides the
-development environment and the checks. `flake.nix` builds filetags from
-source (`packages.filetags`, pinned to novoid/filetags `811c97b8`), and
-`nix develop` gives Emacs (`emacs-nox` from the locked nixpkgs) with
-`package-lint`, `format-all`, `relint` and `dired-subtree`, that `filetags`,
-and `lefthook` (its `shellHook` runs `lefthook install`). ERT and
-byte-compilation also run outside Nix with a local Emacs and `filetags` on
-`PATH`; the lint and format commands need the Nix Emacs's packages.
+development environment, every target and every check. `flake.nix` builds
+filetags from source (`packages.filetags`, pinned to novoid/filetags
+`811c97b8`, version 2026.06.06.1-unstable-2026-09-01, GPL-3.0-or-later),
+and `nix develop` gives Emacs 30.2 (`emacs-nox` from the
+locked nixpkgs, with native compilation) with `package-lint`, `format-all`,
+`relint`, `undercover` and `dired-subtree`, that `filetags`, a Python with
+filetags' dependencies for the fuzz oracle, bash 5, git, lcov, lefthook
+(its `shellHook` runs `lefthook install`), nixfmt, statix, deadnix,
+shellcheck, shfmt, prettier, yamllint, actionlint, zizmor and rumdl. It
+also sets `DIRED_FILETAGS_SYSTEM` (the baseline key), and
+`DIRED_FILETAGS_PYTHON` and `DIRED_FILETAGS_PY` (the fuzz oracle's Python
+and the pinned `filetags/__init__.py`). ERT and byte-compilation also run
+outside Nix with a local Emacs and `filetags` on `PATH`; everything else
+needs the dev shell. `scripts/lint.sh` and `scripts/format-all.sh` need
+bash 4.4 or later, and refuse macOS's `/bin/bash` 3.2.
+
+The flake offers aarch64-darwin, aarch64-linux and x86_64-linux, the
+systems with baselines (`flake-utils.lib.eachSystem`). x86_64-darwin is
+left out because nixpkgs' deprecation warning aborts its evaluation
+under `--option abort-on-warn true`. On aarch64-linux, rumdl is rebuilt
+with `JEMALLOC_SYS_WITH_LG_PAGE=16`: nixpkgs' binary, built on 4 KiB-page
+kernels, aborts with "Unsupported system page size" on 16 KiB-page ones
+such as vulcan's, and one built for 64 KiB pages runs on all three.
+
+### Targets
+
+| Command                                       | What it does                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nix build`                                   | `packages.default`: the package as nixpkgs builds MELPA packages (`melpaBuild`): `share/emacs/site-lisp/elpa/dired-filetags-0.1.0/` with `dired-filetags-autoloads.el` and `-pkg.el`, byte- and native-compiled by the bare `emacs-nox` with warnings as errors, after a `preBuild` compile with `byte-compile-warnings` `all`                                                                                            |
+| `nix flake check`                             | builds and runs the 14 checks below                                                                                                                                                                                                                                                                                                                                                                                       |
+| `nix run .#test [-- REGEXP]`                  | the ERT suite, or the tests matching REGEXP                                                                                                                                                                                                                                                                                                                                                                               |
+| `nix run .#format` / `nix fmt [-- PATH...]`   | `scripts/format-all.sh`: formats every file, or PATHs                                                                                                                                                                                                                                                                                                                                                                     |
+| `nix run .#lint [-- [CHECK...] [-- FILE...]]` | `scripts/lint.sh`: all 11 linters, or the ones named, over every file or the FILEs                                                                                                                                                                                                                                                                                                                                        |
+| `nix run .#coverage [-- ARGS]`                | `scripts/coverage.sh`: report in `reports/coverage/`, then the gate                                                                                                                                                                                                                                                                                                                                                       |
+| `nix run .#perf [-- ARGS]`                    | `scripts/bench.el --report reports/perf --gate all`: measures this machine now                                                                                                                                                                                                                                                                                                                                            |
+| `nix run .#fuzz [-- ARGS]`                    | `scripts/fuzz.sh`: long runs with fresh seeds (default 600 s)                                                                                                                                                                                                                                                                                                                                                             |
+| `nix run .#update-baselines`                  | `coverage.sh --update`, `bench.el --update`, then the diff stat; stops (exit 1) if `bench.el` refuses the timing entry                                                                                                                                                                                                                                                                                                    |
+| `nix build .#coverage`                        | `packages.coverage`: `lcov.info`, `summary.txt`, `html/`                                                                                                                                                                                                                                                                                                                                                                  |
+| `nix build .#perf-report`                     | `packages.perf-report`: a reference profile, measured once in a Nix build sandbox (`--samples 3`) and cached by input hash (perhaps built on, or substituted from, another machine); `PROVENANCE.txt` and the head of `perf.txt` name its build host and time. Its allocation counts hold for the system; its timings are not this machine's. It also has `perf.eld`, `elp.txt`, `profile.txt`, `cpu.prof` and `mem.prof` |
+
+An app runs in the checkout's root: `PRJ_ROOT` (which `nix fmt` sets),
+else the nearest directory at or above the current one that holds
+`dired-filetags.el` and `flake.nix`; outside a checkout it exits 2. The
+format and lint apps then go back to the current directory (`cd
+"$OLDPWD"`), so `nix fmt` and `nix run .#lint` read relative PATHs and
+FILEs from there. The apps put GNU coreutils, findutils, diffutils, sed,
+gawk and grep ahead of the dev tools on `PATH`, so the scripts never
+meet macOS's BSD userland. `reports/` is git-ignored.
+
+### Checks (`nix flake check`)
+
+Each runs in a copy of only the files it reads (`lib.fileset`), with
+only the tools it calls, the dev shell's environment variables, and a
+fresh `HOME` and `TMPDIR`. The package gets `dired-filetags.el`. The
+suite, leak, fuzz, the reports and the five Emacs Lisp linters get every
+`*.el` file and `scripts/*.sh`; the two gates also get `baselines/`.
+format, lint and apps get the whole tree. Only format, lint, apps and
+the Emacs Lisp linters are made a git work tree (`git init -q`, so the
+scripts list files the same way everywhere and `lefthook validate`
+works). A README, CI or lefthook edit therefore rebuilds only format,
+lint and apps, and a baseline edit also rebuilds the two gates.
+
+- `build`: `packages.default`.
+- `ert`: the ERT suite; the run fails (exit 2) when more than one test
+  skips.
+- `leak`: the suite under `scripts/leak-check.el`; the run fails
+  (exit 2) when more than one test skips.
+- `fuzz`: `scripts/fuzz.sh --check`.
+- `coverage`: `scripts/coverage.sh --gate` on `packages.coverage`.
+- `perf`: `bench.el --results PERF-REPORT/perf.eld --gate alloc`; timings
+  are only reported, since no builder has a timing baseline.
+- `format`: `scripts/format-all.sh --check`.
+- `lint`: `scripts/lint.sh check-declare nix shell yaml actions markdown`.
+- `byte-compile`, `native-compile`, `package-lint`, `checkdoc`, `relint`:
+  `scripts/lint.sh CHECK`.
+- `apps`: every app, the formatter and the dev shell build (`$out` links
+  to each), and the apps run from `scripts/` with only `/usr/bin:/bin` on
+  `PATH` (`env -i`): format `--check` on two Emacs Lisp files (a
+  scratch-file bug in `check-format.sh` shows only from the second, as
+  NIX-1's did) and one file per other formatter; lint's `nix`, `shell`
+  and `yaml` checks; the oracle tests; and coverage and fuzz `--help`.
+  On macOS, `check-format.sh` also runs by itself on two files with
+  only `/usr/bin`, `/bin` and Emacs on `PATH`, so its BSD `mktemp`,
+  `cp` and `diff` are exercised, which the apps never meet (they put GNU
+  coreutils first). The check fails if an app changed, deleted or left
+  a file, ignored ones included. perf and update-baselines are only
+  built.
+
+The reports never fail on a regression; the `coverage` and `perf` checks
+are separate, cheap derivations that read them, so a failed gate still
+leaves a report, and each report builds once. A plain `nix flake check` in
+a git repository sees only tracked and staged files: `git add` new files
+first, or use `nix flake check path:$PWD`. The pre-commit hook and CI pass
+`--option abort-on-warn true`.
+
+### Raw commands
 
 **ERT** (the suite drives the real `filetags`):
 
@@ -66,7 +155,7 @@ emacs -Q -batch -L . --eval '(setq load-prefer-newer t)' \
   -l ert -l ./dired-filetags-test.el -f ert-run-tests-batch-and-exit
 ```
 
-A single test or group, by regexp:
+A single test or group, by regexp (or `nix run .#test -- dired-filetags-oracle`):
 
 ```bash
 emacs -Q -batch -L . --eval '(setq load-prefer-newer t)' \
@@ -75,22 +164,63 @@ emacs -Q -batch -L . --eval '(setq load-prefer-newer t)' \
 ```
 
 Tests that need the CLI use `(skip-unless (executable-find "filetags"))`; a
-few also need `git`, and two need `dired-subtree`. A run without them
-passes with skips, so read the `skipped` count in the summary before
-trusting a green result. The flake's `ert` check puts `filetags` and
-`gitMinimal` on `PATH` for this reason.
+few also need `git`, and two need `dired-subtree`. A run of the commands
+above without them passes with skips, so read the `skipped` count in the
+summary before trusting a green result. One case-sensitivity test skips
+on each platform by design (a different one on macOS and on Linux).
+`checks.ert`, `checks.leak`, `nix run .#test`, the lefthook `ert` and
+`leak` jobs and `scripts/coverage.sh` fail instead (exit 2) when more
+than one test skips: they load `scripts/ert-skip-budget.el` after the
+suite, as `-l scripts/ert-skip-budget.el` does for the commands above.
 
-**Byte-compile** (warnings are errors; the flake compiles both files):
+**Leak check** (optional SELECTOR: a regexp, or a Lisp selector starting
+with `(`; exit 1 on a failed test or any leak, 2 if the run itself failed,
+for instance with undercover loaded or over the skip budget):
+
+```bash
+emacs --batch -Q -L . --eval '(setq load-prefer-newer t)' \
+  -l ert -l dired-filetags-test.el -l scripts/leak-check.el \
+  -f dired-filetags-leak-check-batch-and-exit
+```
+
+**Fuzz:** `scripts/fuzz.sh --check` (seed `dired-filetags`, 1000
+iterations, the pre-commit and flake run), `scripts/fuzz.sh [--seconds N]
+[--iterations N]` (rounds of fresh seeds, default 600 s of 20000), and
+`scripts/fuzz.sh --seed S [--iterations N]` to replay a failure; it prints
+the exact command. `DIRED_FILETAGS_FUZZ_SEED` and
+`DIRED_FILETAGS_FUZZ_ITERATIONS` override `--check`'s defaults.
+
+**Coverage:** `scripts/coverage.sh [--out DIR] [--no-gate] [--system SYS]`
+runs the suite under undercover and gates; `--gate DIR` gates an existing
+report; `--update [DIR] [--system SYS]` rewrites SYS's baseline line from
+a fresh run or from DIR. Exit 0 pass, 1 test failure or failed gate, 2
+usage or environment error (including an `.elc` next to a source). A
+missing or stale baseline line fails the gate (exit 1); a missing
+`baselines/coverage.txt` is exit 2.
+
+**Performance:** `emacs -Q --batch -L . -l scripts/bench.el -f
+dired-filetags-bench-batch [--report DIR] [--gate none|alloc|time|all]
+[--results FILE] [--update] [--samples N] [--system SYS]
+[--results-out FILE] [--single-process]`. `--results FILE --update
+--system SYS` records only SYS's allocation baseline from a `perf.eld` a
+report wrote (for Linux, from `nix build .#packages.SYS.perf-report`).
+`--update` and a failed timing gate start two more Emacs processes of
+their own (with `--results-out` and `--single-process`); see Baselines.
+
+**Byte-compile** (every warning is an error; `scripts/lint.sh byte-compile`
+does this for every `.el` file, one Emacs per file, into a temporary
+directory):
 
 ```bash
 emacs --batch -L . \
   --eval '(setq load-prefer-newer t byte-compile-error-on-warn t)' \
+  --eval '(setq byte-compile-warnings (quote all))' \
   -f batch-byte-compile dired-filetags.el dired-filetags-test.el
 ```
 
 This leaves `.elc` files next to the sources (git ignores them); delete
-them afterwards, so a stale one is never loaded instead of a newer edit.
-The lefthook hook compiles into a scratch directory instead.
+them afterwards, so a stale one is never loaded instead of a newer edit,
+and because `coverage.sh` refuses to run while one exists.
 
 **package-lint** (the package file only):
 
@@ -98,19 +228,20 @@ The lefthook hook compiles into a scratch directory instead.
 emacs --batch -L . -l package-lint -f package-lint-batch-and-exit dired-filetags.el
 ```
 
-**checkdoc:**
+**checkdoc** (`lint.sh` also sets `checkdoc-package-keywords-flag`):
 
 ```bash
 emacs --batch -L . -l scripts/run-checkdoc.el dired-filetags.el dired-filetags-test.el
 ```
 
-**relint:**
+**relint** (`lint.sh` also sets `relint-xr-checks` to `all`):
 
 ```bash
 emacs --batch -L . -l relint -f relint-batch dired-filetags.el dired-filetags-test.el
 ```
 
-**Formatting** (`format-all`):
+**Emacs Lisp formatting** (`format-all`; `format-all.sh` calls these for
+`*.el`):
 
 ```bash
 scripts/format.sh dired-filetags.el dired-filetags-test.el        # in place
@@ -119,29 +250,133 @@ scripts/check-format.sh dired-filetags.el dired-filetags-test.el  # report only
 
 Both scripts load `scripts/format-setup.el`, which sets `indent-tabs-mode`
 to nil, turns off backup files (so `format.sh` leaves no `FILE.el~`), and
-evaluates the project's `defmacro` forms so their `indent` declarations
-apply in batch.
+evaluates the root-level files' `defmacro` forms so their `indent`
+declarations apply in batch. It finds the root from its own location,
+reads only regular files whose names start with neither `.` nor `#`, so
+Emacs lock files are left out, and skips, with a message, a file it
+cannot read. Both scripts run `emacs -Q` with stdin from `/dev/null`,
+keep going after a file fails (naming it, with the end of Emacs's
+output), and take relative FILEs from the current directory;
+`check-format.sh` formats copies in a private `mktemp -d` directory.
 
-**All checks** (`ert`, `byte-compile`, `package-lint`, `checkdoc`,
-`relint`, `format`; each runs with fresh `HOME` and `TMPDIR`):
+### Tooling
 
-```bash
-nix flake check
-```
+| File                                                                      | Role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scripts/lint.sh [--staged] [CHECK...] [-- FILE...]`                      | runs byte-compile, native-compile, package-lint, checkdoc, relint, check-declare, nix, shell, yaml, actions, markdown (all by default) over every file git lists, or only the FILEs (a check with none of its kind is skipped; native-compile and package-lint run only if `dired-filetags.el` is among them); `--staged` widens to every file in the index when a linter script or setting (`lint.sh`, `compile.el`, `run-checkdoc.el`, `.shellcheckrc`, `.yamllint.yaml`, `flake.nix`, `flake.lock`) is among them, and byte-compile and check-declare to every indexed `.el` file when any is; prints a summary; exit 1 on any failure, 2 on a usage error |
+| `scripts/compile.el`                                                      | byte and native compilation driver for `lint.sh`: `'all` warnings as errors, output in temporary directories; native mode also fails on `*Native-compile-Log*` warnings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `scripts/format-all.sh [--check] [--staged] [PATH...]`                    | formats, or checks, every tracked or untracked-but-not-ignored file, or the PATHs (relative to the current directory): format-all for `*.el`, nixfmt, `shfmt -i 2 -ci`, prettier for YAML and Markdown; skips `LICENSE.md`; `--staged` widens to the whole index when a formatter script, `.prettierignore`, `flake.nix` or `flake.lock` is among them                                                                                                                                                                                                                                                                                                        |
+| `scripts/format.sh`, `scripts/check-format.sh`, `scripts/format-setup.el` | format-all for Emacs Lisp files                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `scripts/run-checkdoc.el`                                                 | batch checkdoc; exit 1 on any warning or checkdoc error                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `scripts/coverage.sh`                                                     | undercover run, lcov/HTML report, coverage gate and update                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `scripts/ert-skip-budget.el`                                              | advice on `ert-run-tests-batch` that fails a run (exit 2) in which more than one test skips; loaded after the suite by every runner of it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `scripts/leak-check.el`                                                   | the R17 memory-sanitizer analogue: per-test leak snapshots around the ERT suite                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `scripts/bench.el`                                                        | benchmark workloads, profiling report (elp, profiler), allocation and timing gates, update                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `scripts/fuzz.sh`                                                         | fuzz runner: `--check`, long runs, `--seed`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `dired-filetags-fuzz-test.el`                                             | the nine seeded properties, `dired-filetags-fuzz-rerun-regenerates-inputs` (every failure's rerun command regenerates its input) and `dired-filetags-fuzz-batch-and-exit` (fails on any failure or skip); in the root so `format-setup.el`, the lefthook `*.el` globs and MELPA's `*-test.el` exclusion all cover it                                                                                                                                                                                                                                                                                                                                          |
+| `baselines/coverage.txt`                                                  | `SYSTEM EMACS COVERED TOTAL`, one line per system                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `baselines/perf.eld`                                                      | `(alloc (SYSTEM :emacs :native :root-length :counts))` and `(time (SYSTEM/HOST :emacs :native :root-length :power :calibration :ratios))`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `.shellcheckrc`                                                           | `enable=all`, minus SC2250                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `.yamllint.yaml`                                                          | yamllint's default rules, adjusted for prettier and workflows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `.prettierignore`                                                         | `LICENSE.md`, `flake.lock`, `reports/`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
-A plain `nix flake check` in a git repository sees only tracked and staged
-files. While the working tree has untracked files,
-`nix flake check path:$PWD` evaluates the directory as it is.
+### Baselines
 
-**Pre-commit:** `lefthook.yml` runs byte-compile, format-check, checkdoc,
-relint and ERT in parallel when `.el` files are staged, package-lint when
-`dired-filetags.el` is, and `nix flake check` when `flake.nix` or
-`flake.lock` is. Commit from inside `nix develop` so the hooks find the same
-tools as the flake. Run them all by hand with
-`lefthook run pre-commit --all-files`.
+- **Coverage** (`baselines/coverage.txt`, key: system and Emacs version).
+  The gate fails iff `missed_now > missed_base` and
+  `covered_now * total_base < covered_base * total_now` (exact integers):
+  deleting covered code or adding covered code passes; adding uncovered
+  code that lowers the fraction fails. No line for the system, or a line
+  for another Emacs, fails the gate (exit 1), and a missing file is exit
+  2: a gate that compared nothing never passes. On an improvement it
+  suggests `--update`. The current numbers are the ones in
+  `baselines/coverage.txt`; `coverage.sh` prints the run's missed lines.
+- **Allocations** (`baselines/perf.eld` `alloc`, key: system, Emacs
+  version, native compilation). The `memory-use-counts` deltas, weighed
+  by object size, may not exceed 1.05 times the baseline. A missing
+  `perf.eld`, no entry for the system, an entry for another Emacs or
+  native-compilation setting, or a gated workload without a baseline
+  fails the gate. Every counter is gated, including the string-chars of
+  the four `:paths` workloads, whose files are in `/tmp` so that the
+  counts match in the dev shell, the Nix sandbox and CI; only a run
+  whose directory could not be made in `/tmp`, and so has a name of
+  another length than the entry's `:root-length`, reports those
+  string-chars instead, with a NOTE.
+- **Timings** (`baselines/perf.eld` `time`, key: `SYSTEM/HOST` such as
+  `aarch64-darwin/clio`, plus Emacs version and native compilation; the
+  entry also records macOS's power mode as `:power`). Raw seconds are
+  never compared. Ratio = a workload's fastest clean sample over the
+  run's calibration, the lower quartile of the samples of a calibration
+  loop interleaved with the workloads in the same process (not the
+  fastest sample: one lucky sample 2-4% faster than the rest raised
+  every ratio, and more samples only lower a minimum); a sample is clean
+  when the calibration samples on either side of it ran within 10% of
+  that quartile. A workload with fewer than 3 clean samples, or over
+  the threshold times its baseline, is measured again with twice the
+  samples, up to three times (chosen anew after each extra
+  measurement). If it is still over, two new Emacs processes run the
+  timing gate, since a ratio moves by 1-2% from one process to the
+  next with the memory layout, and it fails only if the median of its
+  three ratios is over. The threshold is 1.05, or 1.08 when the run's
+  power mode and the entry's differ: the ratio cancels most of a change
+  of clock speed, not all of it. The `:paths` workloads (mark and tally)
+  are not gated when the entry's `:root-length` differs. Without an
+  entry for SYSTEM/HOST (CI, Nix builders), timings are report-only and
+  the output says so (`perf: NOTE: timings are NOT gated`); a missing
+  `perf.eld` or an entry for another Emacs fails. On an efficiency core
+  the ratios do not hold, so the timing gate is skipped with a NOTE when
+  the calibration is outside 1/1.35 to 1.35 times the recorded one in
+  the same power mode (up to 2.2 times in Low Power Mode when recorded
+  out of it, down to 1/2.2 the other way round, 1/1.8 to 1.8 when
+  either mode is unknown). `--update` records the median of three Emacs
+  processes' ratios and calibrations, each run with the gate's 5
+  samples, so the entry sits in the middle of what a gate run measures.
+  It refuses to record the timing entry (exit 1, allocations still
+  recorded) if a gated workload has fewer than 3 clean samples in one of
+  them, if they differ in power mode, Emacs or directory length, or if
+  the calibration is slower than that range allows against the entry it
+  replaces, and records nothing from a directory outside `/tmp`. clio's
+  entry was recorded on AC power (`:power "normal"`).
 
-**CI:** `.github/workflows/ci.yml` runs `nix flake check --print-build-logs`
-on `ubuntu-latest` for pushes and pull requests to `main`.
+To update: `nix run .#update-baselines` (this system's coverage and
+allocations, this machine's timings; it stops before the diff stat if
+`bench.el` refuses the timing entry). For the other systems, build
+`.#packages.SYS.coverage` and `.#packages.SYS.perf-report`, then run
+`scripts/coverage.sh --update RESULT --system SYS` and `bench.el --results
+RESULT/perf.eld --update --system SYS`. x86_64-linux builds from clio
+need `--eval-store auto --store 'ssh-ng://jwiegley@andoria-08?ssh-key=...'`,
+because the andoria builders reject each other's unsigned paths.
+
+**Pre-commit:** `lefthook.yml` runs one parallel group (format, lint,
+byte-compile, native-compile, package-lint, checkdoc, relint, ERT, leak,
+fuzz, coverage, and the `nix`-tagged `nix build` and `nix flake check`),
+each job filtered by its glob, which also names the scripts that
+implement it, and then the timing gate (`bench.el --gate all`) alone,
+because timings taken while the suite runs on every core measure the
+load. format and lint get `{staged_files}` (which `--all-files` turns
+into every tracked file) with `--staged`, so an untracked or unstaged
+file cannot fail a commit. The hook works from any git client: the
+`lefthook:` command in lefthook.yml runs lefthook directly when
+`DIRED_FILETAGS_SYSTEM` is set (the dev shell) and through
+`nix develop --command` otherwise, so it needs only `nix` on `PATH`. The
+`ert` and `leak` jobs load `scripts/ert-skip-budget.el`, as the flake's
+checks do. Run them all by hand with `lefthook run pre-commit --all-files`;
+`LEFTHOOK_EXCLUDE=nix` skips the two Nix jobs.
+
+**CI:** `.github/workflows/ci.yml` runs on `ubuntu-latest` and
+`macos-latest` for pushes and pull requests to `main`: `nix build`, the
+coverage and performance report builds (copied into `reports/ci/`, made
+writable, and uploaded as the `reports-<os>` artifact, even when a later
+step fails; `reports/coverage` is left to the pre-commit coverage job),
+`nix flake check --all-systems --no-build` (evaluation of every offered
+system, so a new warning on any of them fails), `nix flake check`, and
+`LEFTHOOK_EXCLUDE=nix nix develop --command lefthook run pre-commit
+--all-files`. Every Nix command passes `--option abort-on-warn true`.
+Actions are pinned by SHA, the token is read-only, and newer pushes
+cancel older runs.
+
+**Docs:** there is no documentation build. README.md is the only
+documentation; rumdl lints it and prettier formats it.
 
 **Interactive development:**
 
@@ -181,15 +416,26 @@ set.
 ### Name model
 
 `dired-filetags--split` mirrors filetags' `FILE_WITH_TAGS_REGEX` (first
-` -- ` at index 1 or later, extension of Python `\w` characters, trailing
+" -- " at index 1 or later, extension of Python `\w` characters, trailing
 `.lnk` stripped) and returns offsets. `dired-filetags-parse` returns
 `(BASE TAGS EXT)` exactly as filetags reads it, keeping empty and `--`
-tags; `dired-filetags--clean-tags` drops those. `dired-filetags--check-tags`
-rejects tags filetags cannot apply (spaces, control characters, `/`, a
-leading `-`, and the reserved `.`, `..`, `--`, `cuttimes`).
-`dired-filetags--verify` compares an old and a predicted new name and
-returns a reason string if the prediction is not a faithful retag; tags lost
-to an exclusive group are allowed.
+tags; `dired-filetags--clean-tags` drops those.
+`dired-filetags--untagged-name` downcases the `.lnk` that ends its result,
+even one that ends the base (`"x.LNK -- a"` becomes `"x.lnk"`), so it is
+idempotent. `dired-filetags--check-tags` rejects tags filetags cannot apply
+(whitespace and control characters by Unicode general category, `Cc`,
+`Zs`, `Zl` and `Zp`, through `dired-filetags--unsafe-char-p`, as well as
+by `[:space:]`/`[:cntrl:]`; `/`; a leading `-`; the reserved `.`, `..`,
+`--`, `cuttimes`; and control-file names). A single regexp scan passes the
+usual printable-ASCII tag, so the Unicode check costs nothing there.
+`dired-filetags--control-file-p` matches `.filetags` and
+`.filetags_tagtrees` in any letter case, as APFS folds them, including the
+ligature fi (U+FB01) and long s (U+017F); every control-file test goes
+through it. `dired-filetags--verify` compares an old and a predicted new
+name and returns a reason string if the prediction is not a faithful
+retag: the untagged names must match and, when both names are tagged, so
+must the base and the extension (`"a -- x.b"` and `"a.b -- x"` share an
+untagged name); tags lost to an exclusive group are allowed.
 
 ### Running filetags and the stand-in oracle
 
@@ -226,7 +472,9 @@ sends each group to the oracle in chunks of `dired-filetags--chunk-size`
 (500). It never sends a tag the file already has, nor removes one it
 lacks. `dired-filetags--preflight` then refuses pairs whose new name exists,
 is visited by a buffer, or collides with another pair after
-`dired-filetags--fold` (downcase plus NFC, as APFS compares).
+`dired-filetags--fold` (NFC, downcase, NFC again, as APFS compares; the
+second NFC reorders the combining dot that downcasing U+0130 adds; an
+ASCII name is only downcased).
 `dired-filetags--retag` logs every refusal, signals if nothing is left, and
 otherwise executes and reports.
 
@@ -307,7 +555,7 @@ the source, no concurrent build) and `dired-filetags--tagtrees-prescan`
 from `dired-filetags--permutations`). `dired-filetags--tagtrees-start` then
 runs, asynchronously with `make-process` in the source directory:
 
-```
+```text
 filetags -q --tagtrees --tagtrees-dir TARGET --filebrowser none \
   --tagtrees-depth N --tagtrees-handle-no-tag X [-R]
 ```
@@ -326,7 +574,7 @@ font-lock). It removes and recreates overlays tagged with the
 `dired-filetags` property (priority 50, `evaporate`) on whole lines, and
 skips wdired, `-b` listings and names hidden by
 `dired-filename-display-length`. Its fast path is one `search-forward` for
-` -- ` over the region: without a match, no line is examined, so untagged
+" -- " over the region: without a match, no line is examined, so untagged
 directories cost that search and nothing else. Errors are swallowed: it
 must never signal in redisplay. `dired-filetags--decorate` handles the
 styles: `right` hides the tag segment with `display ""` and
@@ -429,9 +677,14 @@ stated minimum).
 `dired-filetags-test--with-dir` creates a fresh directory and rebinds
 `temporary-file-directory`, `dired-filetags-tagtrees-directory`,
 `dired-log-buffer`, `dired-mode-hook` and the options, so nothing outside
-it is touched. It also puts the tag commands under the default prefix `;`
-with `setopt` (`dired-filetags-test--with-prefix`) and restores the user's
-prefix afterwards, so key tests pass in a session that uses another one.
+it is touched. It also rebinds `dired-filetags-history`,
+`extended-command-history`, `command-history`, `kill-ring`,
+`kill-ring-yank-pointer` and `interprogram-cut-function`, so tests that
+type into the minibuffer leave the user's histories, kill ring and
+clipboard alone; `scripts/leak-check.el` enforces this. It also puts the
+tag commands under the default prefix `;` with `setopt`
+(`dired-filetags-test--with-prefix`) and restores the user's prefix
+afterwards, so key tests pass in a session that uses another one.
 It binds `dired-mode-map` to `dired-filetags-test--stock-dired-map`, which
 is `dired-mode-map` itself unless the session has rebound `:` (as the
 README's setup does), and then a child map with Dired's four EasyPG `:`
@@ -448,3 +701,108 @@ executable as the running suite (`invocation-name`), so the session's own
 definitions are never unloaded: `dired-filetags-prefix-key-set-before-loading`
 (use-package `:custom` with a deferred load, and `setq`) and
 `dired-filetags-unload-feature-turns-the-mode-off`.
+
+### The leak check is the memory-sanitizer analogue
+
+ASan and MSan would test Emacs's C core, not this package, so they do not
+apply. The `leak` check runs the suite under `scripts/leak-check.el`,
+which snapshots around every test and fails on anything new that is still
+alive: buffers, processes, timers; `dired-filetags*` functions and
+anonymous functions (closures, lambdas, compiled or not) gained or lost
+on the default value of any `*-hook`, `*-hooks` or `*-functions`
+variable (aliases skipped), or on its buffer-local value in a buffer
+that existed before the test; entries gained or lost in
+`file-name-handler-alist`; `dired-filetags` overlays in buffers that
+existed before the test; files left in its private temporary directory;
+bindings in `global-map`, `dired-mode-map` and every package keymap; the
+values of every `dired-filetags-*` variable, every `*-history` (except
+`load-history`), `kill-ring`, `process-environment` (names only) and
+`exec-path` (values compared by contents, hash tables included);
+`dired-filetags*` functions defined, redefined or undefined; and advice
+added with `advice-add`. It also looks just before
+`dired-filetags-test--with-dir` cleans up (`:before` advice on
+`dired-filetags-test--cleanup`), since the fixture deletes its directory
+and kills the buffers it made there, with their processes: a file left
+in the fixture's temporary directory is a leak, and so is a buffer the
+fixture would kill (a package buffer made while a Dired buffer below
+the root is current inherits its directory), and a process that would
+die with it, unless it is a Dired or wdired buffer on a directory below
+the root, a buffer visiting a file there, the fixture's log buffer, the
+buffer of a TagTrees build the fixture stops, or the fixture's own
+temporary buffer. Its allowlist (each entry with its reason in the code)
+is the buffers Emacs makes on first use and keeps (`*string-pixel-width*`,
+`*code-conversion-work*` and the `*work*` buffers that Emacs 31's
+`with-work-buffer` keeps for reuse, whose names start with a space, the
+minibuffers, and VC's `*vc*`), `undo-auto--boundary-timer` and
+Emacs 31's minibuffer idle timer `completions--background-update`
+(which a batch Emacs never runs), five Tramp
+file-name handlers (the two tramp-archive ones appear only with D-Bus,
+on Linux), and edebug, `tramp-sh` and `tramp-cache`, preloaded because
+loading edebug binds `C-x X` and advises `eval-defun`, and loading
+tramp's ssh method and cache (which the remote-name tests do) adds
+closures to tramp's own hooks.
+Fix a leak in the test or the package; do not allowlist it. Never run the
+leak check under undercover (it exits 2).
+
+### Baselines change only deliberately
+
+`baselines/coverage.txt` and `baselines/perf.eld` change only on purpose,
+in a commit of their own, with the reason in the message. The Emacs
+version and the system are part of every baseline key, so do not update
+`flake.lock` casually: a bump that changes Emacs makes the coverage,
+allocation and timing gates fail until `nix run .#update-baselines`
+(and the Linux updates described under Baselines) are run. After changing `dired-filetags.el`,
+check `nix run .#perf` and `nix run .#coverage`: line numbers and
+allocations move. `coverage.sh` refuses to run while an `.elc` sits next
+to a source, because undercover would instrument nothing.
+
+### Bench allocations stay machine-independent
+
+The allocation gate compares counts from any machine of a system, so a
+workload may only gate counters that are identical in the dev shell, the
+Nix sandbox and CI's checkout: no dependence on the time zone, the
+locale, `HOME` or `TMPDIR`. bench.el's inputs are synthetic for this
+reason; keep them so. Its files live in a directory it makes in `/tmp`,
+never in `temporary-file-directory`, because the workloads that build
+absolute file names (`:paths t`) allocate string characters, and take
+time, in proportion to that directory's name: TMPDIR differs between
+`nix develop` (`/tmp/nix-shell.XXXXXX`), a shell that sources
+`nix print-dev-env` (under `/var/folders`), the Nix sandbox and CI,
+while a directory in `/tmp` has a truename of one length per system
+(41 characters on macOS, 33 on Linux). Every baseline records that
+length (`:root-length`); mark a new workload that builds absolute names
+`:paths t`, so that a run whose directory could not be in `/tmp` reports
+those numbers instead of gating them.
+
+### Fuzz divergences are fixed, not hidden
+
+When a property finds a divergence, fix it in the package and add a
+regression vector or test to `dired-filetags-test.el` (as the `.LNK`
+base, the moved extension, the Unicode whitespace, the APFS ligature
+and the `fold` idempotence fixes did), or document it as intended in
+`dired-filetags-fuzz-test.el`'s Commentary (the only one today: filetags'
+`$` matches before a final newline, and the package treats every name
+with a newline as untagged). Never narrow the generator to make a
+property pass.
+
+The generators never call the package: they implement the documented
+rules themselves and read names through the Python oracle, so a seed
+makes the same inputs across package edits.
+`dired-filetags-fuzz-rerun-regenerates-inputs` checks that input I is
+the same in a run of I+1 iterations; register a new property's generator
+in `dired-filetags-fuzz--generator` (and `--properties`) so the test
+covers it.
+
+### Never format LICENSE.md
+
+Its copyright line has two spaces after `Wiegley.`, which prettier would
+collapse; `.prettierignore` lists it and `format-all.sh` skips it by name.
+The line is `Copyright (c) 2026, John Wiegley.  All rights reserved.`;
+widen the years to the earliest and latest commit years when they differ.
+
+### scripts/\*.el files define no indenting macros
+
+`scripts/format-setup.el` evaluates only the root-level files' `defmacro`
+forms, so a macro with `(declare (indent ...))` in `scripts/` would be
+formatted differently in batch than in an editor. Keep such macros in a
+root-level file.

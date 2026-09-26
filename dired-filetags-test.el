@@ -161,7 +161,8 @@ for the tests' Dired buffers only; `dired-mode-map' is never changed."
 
 (defmacro dired-filetags-test--with-dir (spec &rest body)
   "Run BODY with `root' bound to a fresh directory populated from SPEC.
-Scratch directories, TagTrees and the Dired log are redirected, so
+Scratch directories, TagTrees and the Dired log are redirected, and
+the tag and command histories and the kill ring are rebound, so
 nothing outside ROOT is touched, and everything the test made is
 deleted afterwards.  BODY starts in a buffer of its own, the user's
 Dired hooks do not run, the tag commands are under the default
@@ -187,6 +188,15 @@ prefix, \";\", and Dired buffers have Dired's own \":\" prefix, as
                 (dired-mode-hook nil)
                 (dired-mode-map (dired-filetags-test--stock-dired-map))
                 (dired-log-buffer dired-filetags-test--log-buffer)
+                ;; Tests that type into the minibuffer add to its
+                ;; histories and can kill text there; keep the user's
+                ;; histories, kill ring and clipboard out of it.
+                (dired-filetags-history nil)
+                (extended-command-history nil)
+                (command-history nil)
+                (kill-ring nil)
+                (kill-ring-yank-pointer nil)
+                (interprogram-cut-function nil)
                 (default-directory root))
            (make-directory temporary-file-directory)
            (when (get-buffer dired-log-buffer) (kill-buffer dired-log-buffer))
@@ -391,6 +401,10 @@ BEG and END default to the whole buffer."
   (pcase-dolist (`(,name ,_ ,_ ,untagged) dired-filetags-test--reference-names)
     (should (equal (list name (dired-filetags--untagged-name name)) (list name untagged))))
   (should (equal (dired-filetags--untagged-name "foo.LNK") "foo.lnk"))
+  ;; Idempotent, even where the base ends in .LNK: found by the fuzz
+  ;; property parse-round-trips.
+  (should (equal (dired-filetags--untagged-name "shortcut.LNK -- work") "shortcut.lnk"))
+  (should (equal (dired-filetags--untagged-name ".LNK -- a") ".lnk"))
   (should (equal (dired-filetags--untagged-name "a.b.c.tar -- NEW.gz") "a.b.c.tar.gz")))
 
 (ert-deftest dired-filetags-parse-tags-accept-paths ()
@@ -439,6 +453,32 @@ BEG and END default to the whole buffer."
                           (dired-filetags--verify "a -- x y.txt" "a -- x y.txt" nil '("y"))))
   (should (dired-filetags--verify "a.txt" "a.txt" '("x") nil)))
 
+(ert-deftest dired-filetags-verify-refuses-a-moved-extension ()
+  "Base and extension stay, even where the untagged names agree.
+Found by the fuzz property verify-is-sound."
+  (should (string-match-p "more than the tags"
+                          (dired-filetags--verify "a -- x.b" "a.b -- x y" '("y") nil)))
+  (should (string-match-p "more than the tags"
+                          (dired-filetags--verify "a.b -- x" "a -- x y.b" '("y") nil)))
+  (should-not (dired-filetags--verify "a.b" "a -- y.b" '("y") nil))
+  (should-not (dired-filetags--verify "a -- y.b" "a.b" nil '("y"))))
+
+(ert-deftest dired-filetags-verify-accepts-removing-the-last-tag-of-a-lnk-base ()
+  "Filetags leaves \"x.LNK\" when it removes the last tag of \"x.LNK -- a\".
+Found by the fuzz property parse-round-trips."
+  (should-not (dired-filetags--verify "shortcut.LNK -- work" "shortcut.LNK" nil '("work")))
+  (should-not (dired-filetags--verify ".LNK -- a" ".LNK" nil '("a"))))
+
+(ert-deftest dired-filetags-fold-is-canonical ()
+  "Folding is idempotent, so that names APFS equates fold alike.
+Found by the fuzz property fold-is-idempotent: downcasing a dotted
+capital I adds a combining dot, which goes after marks of lower class."
+  (let ((dotted (string #x130 #x5a4)))
+    (should (equal (dired-filetags--fold (dired-filetags--fold dotted))
+                   (dired-filetags--fold dotted)))
+    (should (equal (dired-filetags--fold (string ?i #x5a4 #x307))
+                   (dired-filetags--fold dotted)))))
+
 (ert-deftest dired-filetags-check-tags-rejects-unsafe-tags ()
   "Tags that filetags would misread are refused before anything runs."
   (dolist (tags '(nil ("a b") ("a/b") ("a\tb") ("") ("-x") ("-") (".") ("..") ("--")
@@ -448,6 +488,12 @@ BEG and END default to the whole buffer."
     (should (equal (dired-filetags--check-tags tags) '("c++" "日本語" "v1.2" "C#"))))
   (dolist (tags '(("") ("a/b") ("cuttimes")))
     (should-error (dired-filetags--check-tags tags t) :type 'user-error))
+  ;; Unicode whitespace and controls that [:space:] and [:cntrl:] miss;
+  ;; filetags skips a tag made only of them.  Found by the fuzz
+  ;; property check-tags-is-sound.
+  (dolist (char '(#x7f #x85 #x9f #x1680 #x2028 #x2029))
+    (should-error (dired-filetags--check-tags (list (string char))) :type 'user-error)
+    (should-error (dired-filetags--check-tags (list (string ?a char ?b)) t) :type 'user-error))
   (should (equal (dired-filetags--check-tags '("-x" "." "--") t) '("-x" "." "--")))
   (should (equal (cadr (should-error (dired-filetags--check-tags nil) :type 'user-error))
                  "No tags given"))
@@ -3099,9 +3145,16 @@ It runs in a separate Emacs, so this session keeps its definitions."
       (dired-filetags-test--populate root (list name))
       (should (string-match-p "named like a filetags control file"
                               (dired-filetags-test--prescan-error root nil 2 "no-tags")))))
-  (dolist (tag '(".filetags" ".FileTags_TagTrees"))
+  ;; APFS also folds the ligature fi and long s into these names: found
+  ;; by the fuzz property check-tags-is-sound.
+  (dolist (tag (list ".filetags" ".FileTags_TagTrees" (string ?. #xfb01 ?l ?e ?t ?a ?g ?s)
+                     (string ?. ?F ?I ?L ?E ?T ?A ?G #x17f)
+                     (concat (string ?. #xfb01) "letags_tagtrees")))
     (should-error (dired-filetags--check-tags (list tag)) :type 'user-error)
-    (should (dired-filetags--check-tags (list tag) t))))
+    (should (dired-filetags--check-tags (list tag) t)))
+  ;; Dotless i and dotted capital I do not fold to i on APFS.
+  (dolist (tag (list (string ?. ?f #x131 ?l ?e ?t ?a ?g ?s) (string ?. ?F #x130 ?L ?E ?T ?A ?G ?S)))
+    (should (dired-filetags--check-tags (list tag)))))
 
 (ert-deftest dired-filetags-tagtrees-prescan-refusals-match-cli-aborts ()
   "Each new prescan refusal is a case in which filetags really aborts."

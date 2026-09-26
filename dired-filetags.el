@@ -321,12 +321,44 @@ nil.  A trailing .lnk in any letter case is ignored."
   (seq-remove (lambda (tag) (member tag '("" "--"))) (dired-filetags-tags file)))
 
 (defun dired-filetags--untagged-name (name)
-  "Return basename NAME without its tag segment; a trailing .lnk is downcased."
+  "Return basename NAME without its tag segment; a trailing .lnk is downcased.
+That is the .lnk that ends the result, even one that ends the base:
+filetags reads \"x.LNK -- a\" less its tag, \"x.LNK\", as a .lnk file."
   (let ((lnk (and (dired-filetags--lnk-p name) ".lnk")))
     (pcase (dired-filetags--split name)
       (`(,sep ,tags-end ,stem-end)
-       (concat (substring name 0 sep) (substring name tags-end stem-end) lnk))
+       (let ((base (substring name 0 sep)))
+         ;; Without a .lnk of NAME's own or an extension, the result is
+         ;; the base, and only the base's own .lnk can end it.
+         (if (and (not lnk) (= tags-end stem-end) (dired-filetags--lnk-p base))
+             (concat (substring base 0 -4) ".lnk")
+           (concat base (substring name tags-end stem-end) lnk))))
       (_ (if lnk (concat (substring name 0 -4) lnk) name)))))
+
+(defun dired-filetags--unsafe-char-p (char)
+  "Return non-nil if CHAR is Unicode whitespace, a control character or \"/\".
+Unlike [:space:] and [:cntrl:], this does not depend on the syntax
+table, and it covers DEL, the C1 controls, U+1680 and the line and
+paragraph separators; filetags skips a tag made only of whitespace."
+  (or (eq char ?/)
+      (memq (get-char-code-property char 'general-category) '(Cc Zs Zl Zp))))
+
+(defun dired-filetags--control-file-p (name &optional control)
+  "Return non-nil if basename NAME is a filetags control file, in any letter case.
+With CONTROL, a member of `dired-filetags--control-files', it must be
+that one.  APFS folds with Unicode's full case folding, which also
+turns the ligature fi (U+FB01) into \"fi\" and long s (U+017F) into
+\"s\": the only letters besides ASCII that fold into these names."
+  ;; Only these lengths can fold to .filetags or .filetags_tagtrees (the
+  ;; ligature is one letter), and only a ligature or long s needs a
+  ;; copy of NAME: the others compare in place.
+  (and (memq (length name) '(8 9 17 18))
+       (let ((name (if (string-match-p "[\uFB01\u017F]" name)
+                       (string-replace "\u017F" "s" (string-replace "\uFB01" "fi" name))
+                     name)))
+         (if control
+             (eq t (compare-strings name nil nil control nil nil t))
+           (member-ignore-case name dired-filetags--control-files)))))
 
 (defun dired-filetags--check-tags (tags &optional removing)
   "Return TAGS if filetags can apply them, else signal `user-error'.
@@ -334,7 +366,13 @@ With REMOVING, check TAGS for removal, which allows a leading \"-\" and
 every reserved tag except \"cuttimes\"."
   (unless tags (user-error "No tags given"))
   (dolist (tag tags)
-    (when (or (equal tag "") (string-match-p "[[:space:][:cntrl:]/]" tag))
+    (when (or (equal tag "")
+              ;; One scan passes the usual tag: printable ASCII, no "/".
+              (and (string-match-p "[[:space:][:cntrl:]/\x7f[:nonascii:]]" tag)
+                   (or (string-match-p "[[:space:][:cntrl:]/\x7f]" tag)
+                       (and (string-match-p "[[:nonascii:]]" tag)
+                            (cl-loop for char across tag
+                                     thereis (dired-filetags--unsafe-char-p char))))))
       (user-error "Tags cannot contain spaces, control characters or \"/\": %S" tag)))
   (unless removing
     (dolist (tag tags)
@@ -343,7 +381,7 @@ every reserved tag except \"cuttimes\"."
   (dolist (tag tags)
     ;; A tag named like a control file collides with it in TagTrees.
     (when (or (member tag dired-filetags--reserved-tags)
-              (and (not removing) (member-ignore-case tag dired-filetags--control-files)))
+              (and (not removing) (dired-filetags--control-file-p tag)))
       (cond ((not removing) (user-error "Filetags reserves the tag %S" tag))
             ((equal tag "cuttimes")
              (user-error
@@ -360,13 +398,20 @@ ADDS are the tags to add and REMOVES the tags to remove."
 ADDS and REMOVES are the tags requested for this file.  Tags that
 disappear without being requested are allowed: those are exclusive-group
 removals."
-  (let* ((old-tags (dired-filetags-tags old))
-         (new-tags (dired-filetags-tags new))
+  (let* ((old-parse (dired-filetags-parse old))
+         (new-parse (dired-filetags-parse new))
+         (old-tags (nth 1 old-parse))
+         (new-tags (nth 1 new-parse))
          (lost (seq-find (lambda (tag) (not (member tag new-tags))) adds))
          (kept (seq-find (lambda (tag) (member tag new-tags)) removes)))
     (cond
-     ((not (equal (dired-filetags--untagged-name old)
-                  (dired-filetags--untagged-name new)))
+     ((or (not (equal (dired-filetags--untagged-name old)
+                      (dired-filetags--untagged-name new)))
+          ;; Equal untagged names can still hide a moved extension:
+          ;; "a -- x.b" and "a.b -- x" are both "a.b" untagged.
+          (and old-parse new-parse
+               (not (and (equal (car old-parse) (car new-parse))
+                         (equal (nth 2 old-parse) (nth 2 new-parse))))))
       (format "filetags would change more than the tags: %S" new))
      ((or (member "" new-tags) (member "--" new-tags))
       "the name has an empty or \"--\" tag; repair it first with C-x C-q")
@@ -438,7 +483,7 @@ stand-in in its own scratch directory, so results pair with NAMES by
 construction and no user file is touched."
   ;; Any letter case: on APFS a .FILETAGS stand-in would overwrite the
   ;; scratch vocabulary.
-  (when (member-ignore-case ".filetags" names)
+  (when (seq-some (lambda (name) (dired-filetags--control-file-p name ".filetags")) names)
     (error "Cannot name the vocabulary file itself"))
   (let* ((file-name-handler-alist nil)   ; no jka-compr, EasyPG, Tramp (V6)
          (create-lockfiles nil)
@@ -485,7 +530,7 @@ next build of the tree would delete it."
   (dired-filetags--memo
    (cons 'classify file)
    (lambda ()
-     (cond ((member-ignore-case (file-name-nondirectory file) dired-filetags--control-files)
+     (cond ((dired-filetags--control-file-p (file-name-nondirectory file))
             "is a filetags control file")
            ((file-directory-p file) "is a directory (filetags only tags files)")
            ((not (file-exists-p file))
@@ -554,7 +599,11 @@ unless at least one of them can be tagged."
 Names that fold alike are treated as one file on every filesystem.  On
 a case-sensitive one that refuses a few safe renames, never an unsafe
 one."
-  (downcase (ucs-normalize-NFC-string file)))
+  (if (string-match-p "\\`[[:ascii:]]*\\'" file)
+      (downcase file)
+    ;; NFC again after `downcase': the dot that downcasing a dotted
+    ;; capital I adds must be reordered after marks of a lower class.
+    (ucs-normalize-NFC-string (downcase (ucs-normalize-NFC-string file)))))
 
 (defun dired-filetags--preflight (pairs)
   "Return (GOOD . REFUSED) from PAIRS without touching the disk.
@@ -1057,8 +1106,7 @@ the number of lines whose mark changed, or nil if there were none."
      (and (not (looking-at-p dired-re-dot))
           (not (looking-at-p dired-re-dir))           ; from the listing, no stat
           (when-let* ((file (dired-get-filename nil t)))
-            (and (not (member-ignore-case (file-name-nondirectory file)
-                                          dired-filetags--control-files))
+            (and (not (dired-filetags--control-file-p (file-name-nondirectory file)))
                  (not (and (looking-at-p dired-re-sym) (file-directory-p file)))
                  (dired-filetags--match-p (dired-filetags--clean-tags file) tags match))))
      ;; `dired-mark-if' pluralizes this noun phrase by appending "s".
@@ -1241,7 +1289,7 @@ is not \".\", \"..\" or a control file name and does not start with \"-\"."
        (or (member value '("treeroot" "ignore"))
            (and (string-match-p "\\`[^/[:cntrl:]-][^/[:cntrl:]]*\\'" value)
                 (not (member value '("." "..")))
-                (not (member-ignore-case value dired-filetags--control-files))))))
+                (not (dired-filetags--control-file-p value))))))
 
 (defun dired-filetags--check-untagged (untagged)
   "Signal `user-error' unless UNTAGGED is a valid untagged-files setting.
@@ -1306,17 +1354,15 @@ has wiped the tree; each such file is logged to `dired-log-buffer'."
                     ((and (>= depth 2) (member "" tags)) "has an empty tag")
                     ((or (member "." tags) (member ".." tags)) "has a \".\" or \"..\" tag")
                     ((and (> depth 0)
-                          (seq-some (lambda (tag) (member-ignore-case
-                                                   tag dired-filetags--control-files))
-                                    tags))
+                          (seq-some #'dired-filetags--control-file-p tags))
                      "has a tag named like a filetags control file")
                     ((> (gethash (dired-filetags--fold name) seen 0) 1)
                      "shares its name with another file")
                     (tags nil)
-                    ((and treeroot (string-equal-ignore-case name ".filetags"))
+                    ((and treeroot (dired-filetags--control-file-p name ".filetags"))
                      (concat "cannot be linked at the tree root;"
                              " set dired-filetags-tagtrees-untagged"))
-                    ((and (not ignore) (string-equal-ignore-case name ".filetags_tagtrees"))
+                    ((and (not ignore) (dired-filetags--control-file-p name ".filetags_tagtrees"))
                      "is the marker of another TagTree")
                     ((and treeroot (> depth 0) (gethash (dired-filetags--fold name) root-dirs))
                      (concat "collides with the tag folder of that name at the tree root;"
